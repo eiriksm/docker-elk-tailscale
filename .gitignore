@@ -1,0 +1,4 @@
+.env
+/tmp/
+/dataset/
+*.tar.gz
