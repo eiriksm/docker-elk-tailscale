@@ -1,0 +1,218 @@
+name: elk-tailscale
+
+# Nothing in this file publishes a host port. The only way in from outside the
+# Docker network is through the Tailscale proxies below, which reach the
+# tailnet by dialling out. There is no inbound path from the internet.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    environment:
+      node.name: es01
+      cluster.name: ${CLUSTER_NAME}
+      discovery.type: single-node
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      bootstrap.memory_lock: "true"
+      xpack.security.enabled: "true"
+      # The HTTP layer is plaintext on purpose: it is only reachable from this
+      # Docker network. TLS to the outside world is terminated by Tailscale.
+      xpack.security.http.ssl.enabled: "false"
+      xpack.security.transport.ssl.enabled: "false"
+      xpack.license.self_generated.type: basic
+      # Keeps startup deterministic and free of outbound calls.
+      ingest.geoip.downloader.enabled: "false"
+      ES_JAVA_OPTS: -Xms${ES_HEAP_SIZE} -Xmx${ES_HEAP_SIZE}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks: [elk]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS -u "elastic:${ELASTIC_PASSWORD}"
+          "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"
+          >/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+    logging: *logging
+    restart: unless-stopped
+
+  # Creates the built-in service accounts Kibana and Logstash log in with.
+  # Runs to completion on every `up` and is idempotent.
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      LOGSTASH_INTERNAL_PASSWORD: ${LOGSTASH_INTERNAL_PASSWORD}
+    volumes:
+      - ./setup/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    networks: [elk]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    logging: *logging
+    restart: "no"
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
+    environment:
+      LOGSTASH_INTERNAL_PASSWORD: ${LOGSTASH_INTERNAL_PASSWORD}
+      LS_JAVA_OPTS: -Xms${LS_HEAP_SIZE} -Xmx${LS_HEAP_SIZE}
+    volumes:
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    networks: [elk]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9600/_node/pipelines >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+    logging: *logging
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    environment:
+      SERVER_NAME: kibana
+      SERVER_HOST: 0.0.0.0
+      SERVER_PUBLICBASEURL: ${KIBANA_PUBLIC_URL}
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KIBANA_SECURITY_KEY}
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_SAVEDOBJECTS_KEY}
+      XPACK_REPORTING_ENCRYPTIONKEY: ${KIBANA_REPORTING_KEY}
+      TELEMETRY_OPTIN: "false"
+    networks: [elk]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://localhost:5601/api/status
+          | grep -q '"level":"available"'
+      interval: 10s
+      timeout: 10s
+      retries: 90
+      start_period: 60s
+    logging: *logging
+    restart: unless-stopped
+
+  # Test harness. Never started by `up`; invoked explicitly:
+  #   docker compose run --rm toolbox /scripts/seed.sh
+  # It sits on the elk network, so it reaches the services by name and no port
+  # needs to be published to the host in order to test the stack.
+  toolbox:
+    build: ./tools
+    environment:
+      STACK_VERSION: ${STACK_VERSION}
+      CLUSTER_NAME: ${CLUSTER_NAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./dataset:/dataset
+    networks: [elk]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    profiles: [tools]
+
+  # -------------------------------------------------------------------------
+  # Tailnet exposure
+  #
+  # Each proxy joins the tailnet as its own node and serves the container
+  # behind it over HTTPS using a Let's Encrypt cert for <host>.<tailnet>.ts.net.
+  # "AllowFunnel": {} in the serve configs is what keeps these off the public
+  # internet -- Funnel is the only mechanism that would expose them, and it is
+  # explicitly empty.
+  # -------------------------------------------------------------------------
+  tailscale-kibana:
+    image: tailscale/tailscale:${TAILSCALE_VERSION}
+    hostname: ${TS_KIBANA_HOSTNAME}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_HOSTNAME: ${TS_KIBANA_HOSTNAME}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
+      TS_AUTH_ONCE: "true"
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: 0.0.0.0:9002
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS}
+    volumes:
+      - ts-kibana:/var/lib/tailscale
+      - ./tailscale/serve-kibana.json:/config/serve.json:ro
+    networks: [elk]
+    depends_on:
+      kibana:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9002/healthz >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    profiles: [tailnet]
+    logging: *logging
+    restart: unless-stopped
+
+  tailscale-logstash:
+    image: tailscale/tailscale:${TAILSCALE_VERSION}
+    hostname: ${TS_LOGSTASH_HOSTNAME}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_HOSTNAME: ${TS_LOGSTASH_HOSTNAME}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
+      TS_AUTH_ONCE: "true"
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: 0.0.0.0:9002
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS}
+    volumes:
+      - ts-logstash:/var/lib/tailscale
+      - ./tailscale/serve-logstash.json:/config/serve.json:ro
+    networks: [elk]
+    depends_on:
+      logstash:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9002/healthz >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    profiles: [tailnet]
+    logging: *logging
+    restart: unless-stopped
+
+volumes:
+  esdata:
+  ts-kibana:
+  ts-logstash:
+
+networks:
+  elk:

@@ -1,0 +1,91 @@
+name: CI
+
+# Brings up the stack, seeds a deterministic dataset, asserts it is intact,
+# and -- on main -- archives the resulting Elasticsearch data directory to
+# GHCR. That archive is the baseline the migration workflow replays the next
+# version onto.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Serialised per ref so two runs cannot race on the `latest` dataset tag.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stack:
+    name: stack (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Elasticsearch mmaps its indices and refuses to start below this.
+      # Runners default to 65530.
+      - name: Raise vm.max_map_count
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Configure
+        run: cp .env.example .env
+
+      - name: Start Elasticsearch, Logstash and Kibana
+        run: make up-core
+
+      - name: Seed the dataset
+        run: make seed
+
+      - name: Verify the dataset
+        run: make verify
+
+      - name: Archive the Elasticsearch data directory
+        run: make export
+
+      # Kept per-run so a failed migration can be reproduced against the exact
+      # bytes CI saw, independently of what `latest` points at by then.
+      - name: Upload the dataset as a run artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: esdata-${{ matrix.arch }}
+          path: dataset/
+          retention-days: 14
+
+      # Only from one arch: the archive is a Lucene data directory, whose
+      # on-disk format does not depend on the CPU it was written on, and two
+      # jobs pushing `latest` concurrently would be a race for no benefit.
+      - name: Set up oras
+        if: matrix.arch == 'amd64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: oras-project/setup-oras@v2
+
+      - name: Publish the dataset to GHCR
+        if: matrix.arch == 'amd64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          make publish
+
+      - name: Container logs
+        if: failure()
+        run: COMPOSE_PROFILES= docker compose logs --tail 300
+
+      - name: Tear down
+        if: always()
+        run: make clean
