@@ -1,0 +1,6 @@
+---
+# Bind the monitoring API so the container healthcheck can reach it.
+api.http.host: 0.0.0.0
+api.http.port: 9600
+
+log.level: info
