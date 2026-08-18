@@ -1,0 +1,14 @@
+{
+  "TCP": {
+    "443": { "HTTPS": true },
+    "5044": { "TCPForward": "logstash:5044" }
+  },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": {
+        "/": { "Proxy": "http://logstash:8080" }
+      }
+    }
+  },
+  "AllowFunnel": {}
+}
