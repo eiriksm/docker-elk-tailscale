@@ -6,7 +6,7 @@
   ],
   "customManagers": [
     {
-      "description": "STACK_VERSION lives in .env.example, where Renovate cannot see it. Bumping it there is what makes the migration workflow replay real data through the new version.",
+      "description": "STACK_VERSION lives in .env.example, where Renovate cannot see it. Bumping it there is what makes CI's migrate job replay real data through the new version.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^\\.env\\.example$/"

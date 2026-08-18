@@ -1,15 +1,31 @@
 name: CI
 
-# Brings up the stack, seeds a deterministic dataset, asserts it is intact,
-# and -- on main -- archives the resulting Elasticsearch data directory to
-# GHCR. That archive is the baseline the migration workflow replays the next
-# version onto.
+# Brings up the stack, seeds a deterministic dataset, asserts it is intact, and
+# -- on main -- archives the resulting Elasticsearch data directory to GHCR.
+# In parallel it restores the last archive CI published and starts the
+# currently configured STACK_VERSION on top of it, in place, which is what
+# happens to the real deployment when you bump the version and redeploy.
+#
+# Migration used to be a second workflow. It is a job here because the deploy
+# has to know that *everything* passed, and `needs:` is the only way to say
+# that without polling: two workflows finish seconds apart, and a deploy
+# triggered by "a workflow completed" fires once per workflow, cannot see the
+# other one's result without racing it, and gets woken by cancelled runs too.
+# One workflow, one answer.
 
 on:
   push:
     branches: [main]
   pull_request:
+  # Catches upstream image republishes and drift even when nothing changes here.
+  schedule:
+    - cron: "0 4 * * 1"
   workflow_dispatch:
+    inputs:
+      baseline:
+        description: 'Dataset tag to migrate from: a stack version like 9.4.4, or "latest"'
+        default: latest
+        required: false
 
 concurrency:
   # Serialised per ref so two runs cannot race on the `latest` dataset tag.
@@ -89,3 +105,127 @@ jobs:
       - name: Tear down
         if: always()
         run: make clean
+
+  # Restores the last dataset CI published and starts the currently configured
+  # STACK_VERSION on top of it. This is what makes a version bump reviewable:
+  # the PR that changes STACK_VERSION gets a green or red answer about whether
+  # existing data survives it, before anyone merges.
+  #
+  # Deliberately not `needs: stack`. It migrates from the last *published*
+  # dataset, not from this run's, so making it wait would only lengthen the
+  # path to a deploy.
+  migrate:
+    name: migrate (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Raise vm.max_map_count
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Configure
+        run: cp .env.example .env
+
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
+
+      - name: Fetch the baseline dataset
+        id: fetch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASELINE: ${{ inputs.baseline || 'latest' }}
+        run: |
+          # Anonymous pull is enough for a public package, so a fork PR whose
+          # token cannot log in still gets to run the test.
+          echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin \
+            || echo "::warning::ghcr.io login failed; falling back to anonymous pull"
+
+          if ./scripts/fetch-dataset.sh "${BASELINE}"; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            code=$?
+            if [ "${code}" -eq 3 ]; then
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::No dataset published at tag '${BASELINE}' yet. Merge to main once so CI can publish a baseline, then this test has something to migrate from."
+            else
+              exit "${code}"
+            fi
+          fi
+
+      - name: Report the upgrade under test
+        if: steps.fetch.outputs.found == 'true'
+        run: |
+          from=$(jq -r .stack_version dataset/metadata.json)
+          to=$(grep '^STACK_VERSION=' .env.example | cut -d= -f2)
+          echo "### Migration: \`${from}\` → \`${to}\` (${{ matrix.arch }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${from}" = "${to}" ]; then
+            echo "::notice::Baseline and target are both ${from}; this run re-tests restart-on-existing-data rather than a version upgrade."
+          fi
+
+      - name: Restore the data directory
+        if: steps.fetch.outputs.found == 'true'
+        run: make import
+
+      - name: Start the new version on it
+        if: steps.fetch.outputs.found == 'true'
+        run: make up-core
+
+      - name: Verify the migrated data and that ingest still works
+        if: steps.fetch.outputs.found == 'true'
+        run: COMPOSE_PROFILES= docker compose run --rm toolbox /scripts/verify.sh --check-writes
+
+      - name: Container logs
+        if: failure()
+        run: COMPOSE_PROFILES= docker compose logs --tail 300
+
+      - name: Tear down
+        if: always()
+        run: make clean
+
+  # The only automatic path to a deployment. `needs:` is the whole gate: this
+  # job cannot start unless every job above succeeded, so there is nothing to
+  # poll and nothing to race.
+  #
+  # It also means no Deploy run is *created* for a commit that did not pass --
+  # a cancelled or failed run simply never reaches here, instead of spawning a
+  # Deploy that exists only to decide against itself.
+  #
+  # A fork cannot reach this: a pull request is not a push to main, and a fork
+  # PR's token is read-only regardless, so the dispatch below would fail even
+  # if the condition somehow passed.
+  deploy-trigger:
+    name: Trigger deploy
+    needs: [stack, migrate]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the deploy for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # `workflow_dispatch` is one of the two events GitHub lets a
+          # GITHUB_TOKEN trigger; everything else is suppressed to prevent
+          # recursion. The commit is passed explicitly because a dispatched
+          # run's own github.sha is the tip of the ref, which by then may have
+          # moved on.
+          gh workflow run deploy.yml --repo "$REPO" --ref main -f sha="$SHA" -f force=false
+          echo "Dispatched Deploy for ${SHA:0:7}" >> "$GITHUB_STEP_SUMMARY"
