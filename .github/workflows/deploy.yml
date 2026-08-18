@@ -1,0 +1,220 @@
+name: Deploy
+
+# Deploys a commit that CI and the migration test have both already passed onto
+# the host running the real stack, over the tailnet.
+#
+# This repository is public and this workflow holds the keys to a real server,
+# so a few things here are load-bearing rather than stylistic:
+#
+#   * The trigger is `workflow_run`. Those jobs run with the workflow file from
+#     the default branch and with access to secrets, which is what makes them
+#     safe to use where `pull_request_target` would not be -- but it also means
+#     they fire for *pull request* runs, including from forks. The guard that
+#     actually stops a fork is `workflow_run.event == 'push'`; a pull request
+#     produces `pull_request`, never `push`.
+#   * `branches: [main]` filters on the head branch *name*, and a fork can name
+#     a branch `main` too. It is a convenience filter, not a trust boundary.
+#   * Everything printed below is publicly readable. The host lives in a secret
+#     rather than a variable so Actions masks it in logs, and nothing here runs
+#     `docker compose config` or dumps container logs -- both would print real
+#     credentials into a public log.
+#   * No `${{ }}` interpolation appears inside a `run:` script; values arrive as
+#     environment variables, so nothing from an event payload can be spliced
+#     into a shell command.
+#   * The server independently refuses any commit that is not an ancestor of
+#     origin/main. Even a dispatch on some other ref cannot make it run
+#     arbitrary code.
+
+on:
+  workflow_run:
+    workflows: ["CI", "Migration test"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_checks:
+        description: "Deploy even if CI or the migration test are not green"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # Both required workflows fire their own `workflow_run` event, so this job
+  # answers "is *everything* green for this commit yet?" rather than "did the
+  # workflow that woke me up pass?". The first event usually finds the other
+  # workflow still running and stops here; the second one deploys. When they
+  # finish close enough together to both see green, the deploy runs twice for
+  # the same commit -- `docker compose up -d --wait` on an unchanged checkout
+  # is a no-op, and remote-deploy.sh short-circuits it anyway.
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    # Without DEPLOY_ENABLED set as a repository variable this workflow is
+    # inert, so forking the repo does not put a red X on someone else's
+    # Actions tab or leave them wondering which secrets they are missing.
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    permissions:
+      actions: read
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      deploy: ${{ steps.check.outputs.deploy }}
+    steps:
+      - name: Check the required workflows for this commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
+          SKIP_CHECKS: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_checks || 'false' }}
+        run: |
+          set -euo pipefail
+
+          # Belt and braces before this ends up on a remote command line.
+          [[ ${SHA} =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::not a commit sha"
+            exit 1
+          }
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+          echo "### Deploy gate for \`${SHA:0:7}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ${SKIP_CHECKS} == true ]]; then
+            echo "::warning::forced deploy; required checks were not consulted"
+            echo "- required checks **skipped** by manual dispatch" >> "$GITHUB_STEP_SUMMARY"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Newest first, so the first line matching a workflow name is its
+          # latest run -- which is the one a re-run updates.
+          runs="$(gh api --paginate \
+            "/repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
+            --jq '.workflow_runs[] | [.name, .status, .conclusion] | @tsv')"
+
+          deploy=true
+          for name in "CI" "Migration test"; do
+            line="$(awk -F'\t' -v n="${name}" '$1 == n { print; exit }' <<<"${runs}")"
+            if [[ -z ${line} ]]; then
+              echo "- \`${name}\`: no run for this commit" >> "$GITHUB_STEP_SUMMARY"
+              deploy=false
+              continue
+            fi
+            IFS=$'\t' read -r _ status conclusion <<<"${line}"
+            if [[ ${status} != completed ]]; then
+              echo "- \`${name}\`: still ${status}" >> "$GITHUB_STEP_SUMMARY"
+              deploy=false
+            elif [[ ${conclusion} != success ]]; then
+              echo "- \`${name}\`: ${conclusion}" >> "$GITHUB_STEP_SUMMARY"
+              deploy=false
+            else
+              echo "- \`${name}\`: success" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          # Deliberately not a failure. A red required workflow is already
+          # shouting; a second red X here would just be an echo of it.
+          if [[ ${deploy} != true ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Not deploying." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "deploy=${deploy}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    # The environment is what scopes the secrets and pins deployments to
+    # `main`, through its deployment branch policy -- configured on GitHub,
+    # not in this file. There is deliberately no required reviewer: the review
+    # happens on the pull request, and the gate job above is what holds a
+    # commit back until there is evidence for it.
+    #
+    # Deliberately no `url:`; it would publish the tailnet hostname on every
+    # run of a public repository.
+    environment: production
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - name: Join the tailnet
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'docker-elk-tailscale' }}
+          DEPLOY_SHA: ${{ needs.gate.outputs.sha }}
+          # A manual run means someone wants the deploy to happen, so it skips
+          # the "nothing changed" short-circuit.
+          DEPLOY_FORCE: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+
+          # There is no host key to pin: Tailscale SSH generates an ephemeral
+          # one per connection. What authenticates this hop is WireGuard plus
+          # the tailnet ACL, which only lets tag:ci reach this user on this
+          # node -- not the SSH host key. The known_hosts file is per-run and
+          # thrown away with the runner.
+          ssh -o BatchMode=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile="${RUNNER_TEMP}/known_hosts" \
+              -o ConnectTimeout=30 \
+              "$DEPLOY_HOST" \
+              "DEPLOY_SHA='$DEPLOY_SHA' DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_FORCE='$DEPLOY_FORCE' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$HOME/$DEPLOY_PATH"
+
+          # Nothing past this point trusts the checkout, because the deploy
+          # script is part of it. Fetch first, prove the commit is on
+          # origin/main, and only then check it out.
+          git fetch --quiet --prune origin
+          git merge-base --is-ancestor "$DEPLOY_SHA" origin/main || {
+            echo "refusing to deploy ${DEPLOY_SHA}: not an ancestor of origin/main" >&2
+            exit 1
+          }
+
+          DEPLOY_PREVIOUS_SHA="$(git rev-parse HEAD)"
+          export DEPLOY_PREVIOUS_SHA
+
+          git checkout --quiet --detach "$DEPLOY_SHA"
+
+          # Hand off to the just-checked-out script as a *file*, with stdin
+          # closed. This heredoc is the remote bash's stdin, and `docker
+          # compose exec` forwards stdin to the container -- so running the
+          # compose steps from here means the first one eats the rest of the
+          # script and the deploy ends silently with exit 0. Keep this
+          # bootstrap free of anything that reads stdin.
+          exec bash scripts/remote-deploy.sh </dev/null
+          REMOTE
+
+      - name: Explain where the logs are
+        if: failure()
+        run: |
+          {
+            echo "### Deploy failed"
+            echo ""
+            echo "Container logs are deliberately not printed here: this log is"
+            echo "public and the stack's logs contain real data. Read them on"
+            echo "the host:"
+            echo ""
+            echo '```sh'
+            echo "cd ~/<deploy path> && docker compose logs --tail 200"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
