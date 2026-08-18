@@ -151,7 +151,6 @@ services:
   # -------------------------------------------------------------------------
   tailscale-kibana:
     image: tailscale/tailscale:${TAILSCALE_VERSION}
-    hostname: ${TS_KIBANA_HOSTNAME}
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY}
       TS_HOSTNAME: ${TS_KIBANA_HOSTNAME}
@@ -181,7 +180,6 @@ services:
 
   tailscale-logstash:
     image: tailscale/tailscale:${TAILSCALE_VERSION}
-    hostname: ${TS_LOGSTASH_HOSTNAME}
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY}
       TS_HOSTNAME: ${TS_LOGSTASH_HOSTNAME}
