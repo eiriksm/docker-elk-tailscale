@@ -44,7 +44,7 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Raise vm.max_map_count
         run: sudo sysctl -w vm.max_map_count=262144
@@ -52,7 +52,7 @@ jobs:
       - name: Configure
         run: cp .env.example .env
 
-      - uses: oras-project/setup-oras@v2
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
 
       - name: Fetch the baseline dataset
         id: fetch

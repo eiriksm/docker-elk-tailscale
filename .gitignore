@@ -1,4 +1,3 @@
 .env
-/tmp/
-/dataset/
-*.tar.gz
+/dataset/*
+!/dataset/.gitkeep

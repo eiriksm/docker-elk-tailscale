@@ -36,7 +36,7 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Elasticsearch mmaps its indices and refuses to start below this.
       # Runners default to 65530.
@@ -61,7 +61,7 @@ jobs:
       # Kept per-run so a failed migration can be reproduced against the exact
       # bytes CI saw, independently of what `latest` points at by then.
       - name: Upload the dataset as a run artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: esdata-${{ matrix.arch }}
           path: dataset/
@@ -72,7 +72,7 @@ jobs:
       # jobs pushing `latest` concurrently would be a race for no benefit.
       - name: Set up oras
         if: matrix.arch == 'amd64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: oras-project/setup-oras@v2
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
 
       - name: Publish the dataset to GHCR
         if: matrix.arch == 'amd64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
