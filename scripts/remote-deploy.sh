@@ -118,9 +118,15 @@ log "pulling images"
 "${compose[@]}" pull --quiet
 
 log "starting the stack"
+# --force-recreate because config that changes with a commit -- logstash's
+# pipeline and logstash.yml -- is bind-mounted, not baked into the image.
+# Compose's own diff only looks at image/env/ports/volume list, never at
+# what a bind-mounted file contains, so without this a pipeline-only change
+# would reach the host but never reach the running container.
+#
 # --wait fails the deploy if anything does not become healthy, which is what
 # turns a broken upgrade into a red run instead of a quiet outage.
-"${compose[@]}" up -d --wait --wait-timeout 600 --remove-orphans
+"${compose[@]}" up -d --wait --wait-timeout 600 --remove-orphans --force-recreate
 
 # --wait already waited on the healthchecks; this asserts the cluster itself
 # came back, not just the process. The password is expanded inside the
