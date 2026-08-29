@@ -36,6 +36,21 @@ permissions:
   contents: read
 
 jobs:
+  # Asserts the Slack-alerting logic in 20-filters.conf, on its own: a single
+  # Logstash container fed fixture events through the real filter file, no
+  # Elasticsearch or tailnet involved. Fast and independent of the stack job,
+  # so a broken alert rule fails in seconds rather than after the full boot.
+  filters:
+    name: Slack filter logic
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Assert the Slack forwarding logic
+        run: ./scripts/test-filters.sh
+
   stack:
     name: stack (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -206,7 +221,7 @@ jobs:
   # if the condition somehow passed.
   deploy-trigger:
     name: Trigger deploy
-    needs: [stack, migrate]
+    needs: [filters, stack, migrate]
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
