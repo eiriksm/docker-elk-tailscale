@@ -7,7 +7,7 @@ COMPOSE      := docker compose
 CORE_COMPOSE := COMPOSE_PROFILES= $(COMPOSE)
 TOOLBOX      := $(CORE_COMPOSE) run --rm toolbox
 
-.PHONY: help up up-core down clean logs ps seed verify test export import publish fetch migration-test
+.PHONY: help up up-core down clean logs ps seed verify test test-filters export import publish fetch migration-test
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -38,6 +38,9 @@ verify: ## Assert the running stack still holds exactly that dataset
 	$(TOOLBOX) /scripts/verify.sh
 
 test: up-core seed verify ## Start a clean stack, seed it, and verify it
+
+test-filters: ## Assert the Slack-alerting logic in 20-filters.conf, no stack needed
+	./scripts/test-filters.sh
 
 export: ## Stop the stack and archive its data directory to dataset/
 	./scripts/export-dataset.sh

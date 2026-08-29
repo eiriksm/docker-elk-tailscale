@@ -1,0 +1,20 @@
+{"_id": "nginx-error-basic", "_alert": true, "_contains": ["nginx error: 2026/08/29 10:00:00 [error] 12345#0: *1 connect() failed"], "event": {"dataset": "nginx.error"}, "message": "2026/08/29 10:00:00 [error] 12345#0: *1 connect() failed (111: Connection refused) while connecting to upstream"}
+{"_id": "nginx-error-signal-process-noise", "_alert": false, "event": {"dataset": "nginx.error"}, "message": "2026/08/29 10:00:00 [notice] 1#1: signal process started"}
+{"_id": "nginx-error-directory-index-noise", "_alert": false, "event": {"dataset": "nginx.error"}, "message": "2026/08/29 10:00:00 [error] 1#1: *2 directory index of \"/var/www/html/modules/\" is forbidden, client: 1.2.3.4"}
+{"_id": "nginx-priority-over-level-name", "_alert": true, "_contains": ["nginx error: worker process exited on signal 11"], "_excludes": ["ERROR in app"], "event": {"dataset": "nginx.error"}, "level_name": "ERROR", "channel": "app", "message": "worker process exited on signal 11"}
+{"_id": "level-error-lowercase", "_alert": true, "_contains": ["error in app: Uncaught exception in worker"], "level_name": "error", "channel": "app", "message": "Uncaught exception in worker"}
+{"_id": "level-error-uppercase-monolog", "_alert": true, "_contains": ["ERROR in billing: Payment gateway timeout"], "level_name": "ERROR", "channel": "billing", "message": "Payment gateway timeout"}
+{"_id": "level-warning", "_alert": true, "_contains": ["WARNING in app: Disk usage above threshold"], "level_name": "WARNING", "channel": "app", "message": "Disk usage above threshold"}
+{"_id": "level-critical", "_alert": true, "_contains": ["CRITICAL in app: Database connection pool exhausted"], "level_name": "CRITICAL", "channel": "app", "message": "Database connection pool exhausted"}
+{"_id": "level-info-not-alerted", "_alert": false, "level_name": "info", "channel": "app", "message": "Request completed"}
+{"_id": "violinist-exit-code-noise", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Exit code from process checking update for acme/widget was 1"}
+{"_id": "violinist-404-with-class", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Caught exception (Gitlab\\Exception\\RuntimeException) when checking for updates for node id 42: 404 Project Not Found"}
+{"_id": "violinist-404-no-class", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Caught exception when checking for updates for node id 42: 404 Project Not Found"}
+{"_id": "violinist-401", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Caught exception (Github\\Exception\\RuntimeException) when checking for updates for node id 7: 401 Unauthorized"}
+{"_id": "violinist-no-access", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Caught exception when checking for updates for node id 7: You may not have access to this repository or it no longer exists in this workspace."}
+{"_id": "violinist-composer-timeout", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Caught exception for process: The process \"'composer' 'show' 'acme/widget'\" exceeded the timeout of 60 seconds."}
+{"_id": "violinist-token-refresh", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Caught an exception trying to figure out the gitlab token. The message was Bad Request and the trace was #0 {main}"}
+{"_id": "violinist-sha-not-found", "_alert": false, "level_name": "error", "channel": "violinist_projects", "message": "Sha for package acme/widget was not stored, but also not found when looking for it. Thus it will be not found on next run as well."}
+{"_id": "drupal-page-not-found", "_alert": false, "level_name": "warning", "channel": "page not found", "message": "/nonexistent-page"}
+{"_id": "drupal-access-denied", "_alert": false, "level_name": "warning", "channel": "access denied", "message": "/admin/config"}
+{"_id": "no-match-plain-event", "_alert": false, "message": "just a log line"}
