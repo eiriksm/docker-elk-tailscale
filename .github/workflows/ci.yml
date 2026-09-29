@@ -103,7 +103,7 @@ jobs:
       # jobs pushing `latest` concurrently would be a race for no benefit.
       - name: Set up oras
         if: matrix.arch == 'amd64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2
 
       - name: Publish the dataset to GHCR
         if: matrix.arch == 'amd64' && github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -153,7 +153,7 @@ jobs:
       - name: Configure
         run: cp .env.example .env
 
-      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2
 
       - name: Fetch the baseline dataset
         id: fetch
